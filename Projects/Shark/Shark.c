@@ -1,6 +1,6 @@
 /*
 *
-* Copyright (c) 2015 - 2019 by blindtiger. All rights reserved.
+* Copyright (c) 2015 - 2021 by blindtiger. All rights reserved.
 *
 * The contents of this file are subject to the Mozilla Public License Version
 * 2.0 (the "License")); you may not use this file except in compliance with
@@ -21,10 +21,19 @@
 
 #include "Shark.h"
 
-#include "Detours.h"
+#include "Guard.h"
 #include "Reload.h"
 #include "PatchGuard.h"
 #include "Space.h"
+
+#pragma section( ".block", read, write )
+
+__declspec(allocate(".block")) GPBLOCK GpBlock = { 0 };
+__declspec(allocate(".block")) PGBLOCK PgBlock = { 0 };
+
+// #ifdef ALLOC_PRAGMA
+// #pragma alloc_text(PAGE, DriverEntry)
+// #endif
 
 VOID
 NTAPI
@@ -78,6 +87,8 @@ DriverEntry(
     PDEVICE_OBJECT DeviceObject = NULL;
     UNICODE_STRING DeviceName = { 0 };
     UNICODE_STRING SymbolicLinkName = { 0 };
+    PMMPTE PointerPte = NULL;
+    PFN_NUMBER NumberOfPages = 0;
 
     RtlInitUnicodeString(&DeviceName, DEVICE_STRING);
 
@@ -103,6 +114,32 @@ DriverEntry(
 
         if (NT_SUCCESS(Status)) {
             DriverObject->DriverUnload = (PDRIVER_UNLOAD)DriverUnload;
+
+            GpBlock.PgBlock = &PgBlock;
+            PgBlock.GpBlock = &GpBlock;
+
+            InitializeGpBlock(&GpBlock);
+            InitializeSpace(&GpBlock);
+
+            PointerPte = GetPteAddress(&GpBlock);
+            NumberOfPages = BYTES_TO_PAGES(sizeof(GPBLOCK));
+
+            while (NumberOfPages--) {
+                PointerPte[NumberOfPages].u.Hard.NoExecute = 0;
+            }
+
+            FlushMultipleTb(&GpBlock, sizeof(GPBLOCK), TRUE);
+
+            PointerPte = GetPteAddress(&PgBlock);
+            NumberOfPages = BYTES_TO_PAGES(sizeof(PGBLOCK));
+
+            while (NumberOfPages--) {
+                PointerPte[NumberOfPages].u.Hard.NoExecute = 0;
+            }
+
+            FlushMultipleTb(&PgBlock, sizeof(PGBLOCK), TRUE);
+
+            InitializeGuardTrampoline();
 
 #ifndef PUBLIC
             DbgPrint("[Shark] load\n");
@@ -223,24 +260,7 @@ DeviceControl(
 
     switch (IrpSp->Parameters.DeviceIoControl.IoControlCode) {
     case 0: {
-        PPGBLOCK PgBlock = NULL;
-
-        GpBlock = ExAllocatePool(
-            NonPagedPool,
-            sizeof(GPBLOCK) + sizeof(PGBLOCK));
-
-        if (NULL != GpBlock) {
-            RtlZeroMemory(
-                GpBlock,
-                sizeof(GPBLOCK) + sizeof(PGBLOCK));
-
-            InitializeGpBlock(GpBlock);
-            InitializeSystemSpace(GpBlock);
-
-            PgBlock =(PCHAR)GpBlock + sizeof(GPBLOCK);
-
-            PgClear(PgBlock);
-        }
+        PgClear(&PgBlock);
 
         Irp->IoStatus.Information = 0;
 
